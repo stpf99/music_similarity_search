@@ -138,31 +138,51 @@ class DatabaseThread(QThread):
     def run(self):
         try:
             json_path = os.path.join(self.input_dir, "music_features.json")
+            existing_files = set()  # Track files in the existing database
+
+            # Load existing database if it exists
             if os.path.exists(json_path):
                 try:
                     with open(json_path, 'r') as f:
-                        self.database.update(json.load(f))
-                    self.update_signal.emit(f"Loaded existing database ({len(self.database)} songs).")
-                    logging.info(f"Loaded database from {json_path}, {len(self.database)} songs.")
+                        loaded_data = json.load(f)
+                        self.database.update(loaded_data)
+                        existing_files = set(loaded_data.keys())
+                        self.update_signal.emit(f"Loaded partial database with {len(self.database)} songs.")
+                        logging.info(f"Loaded partial database from {json_path} with {len(self.database)} songs.")
+                except json.JSONDecodeError as e:
+                    self.update_signal.emit(f"Corrupted JSON database found, starting fresh: {e}")
+                    logging.warning(f"Corrupted JSON database at {json_path}: {e}. Starting fresh.")
+                    self.database = self.manager.dict()  # Reset database
                 except Exception as e:
                     self.update_signal.emit(f"Error loading JSON database: {e}")
                     logging.error(f"Error loading JSON database: {e}\n{traceback.format_exc()}")
+                    self.database = self.manager.dict()  # Reset database
 
+            # Identify files to analyze (new or modified)
             files_to_analyze = []
             total_files = len(self.audio_files)
-            self.update_signal.emit(f"Scanning {total_files} files...")
+            self.update_signal.emit(f"Scanning {total_files} files for updates...")
             logging.info(f"Scanning {total_files} files in directory {self.input_dir}.")
+            
             for i, audio_file in enumerate(self.audio_files):
-                mtime = os.path.getmtime(audio_file)
-                if audio_file not in self.database or self.database[audio_file]['last_modified'] != mtime:
-                    files_to_analyze.append(audio_file)
+                try:
+                    mtime = os.path.getmtime(audio_file)
+                    if audio_file not in self.database or self.database[audio_file].get('last_modified', 0) != mtime:
+                        files_to_analyze.append(audio_file)
+                    else:
+                        logging.info(f"Skipping unchanged file: {audio_file}")
+                except Exception as e:
+                    self.update_signal.emit(f"Error checking file {audio_file}: {e}")
+                    logging.error(f"Error checking file {audio_file}: {e}\n{traceback.format_exc()}")
+                    files_to_analyze.append(audio_file)  # Analyze if file access fails
                 self.progress_signal.emit(int((i + 1) / total_files * 50))
                 if i % 100 == 0:
                     QApplication.processEvents()
 
-            self.update_signal.emit(f"Found {len(files_to_analyze)} new/changed files to analyze.")
-            logging.info(f"Found {len(files_to_analyze)} new/changed files to analyze.")
+            self.update_signal.emit(f"Found {len(files_to_analyze)} new or modified files to analyze.")
+            logging.info(f"Found {len(files_to_analyze)} new or modified files to analyze.")
 
+            # Process files in batches
             if files_to_analyze:
                 batch_size = get_dynamic_batch_size(10, len(files_to_analyze))
                 with Pool(processes=psutil.cpu_count(logical=False)) as pool:
@@ -174,10 +194,11 @@ class DatabaseThread(QThread):
                         for audio_file, features in zip(batch, results):
                             if features:
                                 self.database[audio_file] = features
-                        self.progress_signal.emit(50 + int((i + len(batch)) / len(files_to_analyze) * 50))
-                        if len(batch) % 5 == 0:
-                            QApplication.processEvents()
-
+                                logging.info(f"Indexed features for {audio_file}.")
+                            else:
+                                logging.warning(f"Failed to extract features for {audio_file}.")
+                        
+                        # Save progress incrementally
                         try:
                             with open(json_path, 'w') as f:
                                 json.dump(dict(self.database), f, indent=4)
@@ -186,6 +207,20 @@ class DatabaseThread(QThread):
                         except Exception as e:
                             self.update_signal.emit(f"Error saving JSON database: {e}")
                             logging.error(f"Error saving JSON database: {e}\n{traceback.format_exc()}")
+
+                        self.progress_signal.emit(50 + int((i + len(batch)) / len(files_to_analyze) * 50))
+                        if len(batch) % 5 == 0:
+                            QApplication.processEvents()
+
+            # Final save to ensure all data is persisted
+            try:
+                with open(json_path, 'w') as f:
+                    json.dump(dict(self.database), f, indent=4)
+                self.update_signal.emit(f"Completed indexing. Final database saved with {len(self.database)} songs.")
+                logging.info(f"Final database saved with {len(self.database)} songs.")
+            except Exception as e:
+                self.update_signal.emit(f"Error saving final JSON database: {e}")
+                logging.error(f"Error saving final JSON database: {e}\n{traceback.format_exc()}")
 
             self.finished_signal.emit(dict(self.database))
         except Exception as e:
