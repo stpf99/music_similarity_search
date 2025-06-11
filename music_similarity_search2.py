@@ -43,6 +43,11 @@ def extract_features(audio_file):
         max_samples = int(30 * sample_rate)
         loader = es.MonoLoader(filename=audio_file, sampleRate=sample_rate)
         audio = loader()
+        
+        # Validate audio data
+        if len(audio) == 0:
+            logging.error(f"Empty audio file: {audio_file}")
+            return None
         if len(audio) > max_samples:
             audio = audio[:max_samples]
 
@@ -79,11 +84,34 @@ def extract_features(audio_file):
         features['spectral_centroid'] = float(np.mean(features['spectral_centroid']))
         features['energy'] = float(np.mean(features['energy']))
 
-        features['tempo'], _, _, _ = tempo(audio)
-        key, scale, strength = key(audio)
-        features['key'] = f"{key} {scale}"
-        features['danceability'] = danceability(audio)[0]
-        features['dynamic_complexity'] = dynamic_complexity(audio)[0]
+        # Handle tempo extraction with flexible unpacking
+        try:
+            tempo_results = tempo(audio)
+            features['tempo'] = float(tempo_results[0]) if tempo_results and len(tempo_results) > 0 else None
+        except Exception as e:
+            logging.error(f"Error extracting tempo for {audio_file}: {e}\n{traceback.format_exc()}")
+            features['tempo'] = None
+
+        # Extract other features
+        try:
+            key, scale, strength = key(audio)
+            features['key'] = f"{key} {scale}"
+        except Exception as e:
+            logging.error(f"Error extracting key for {audio_file}: {e}\n{traceback.format_exc()}")
+            features['key'] = None
+
+        try:
+            features['danceability'] = danceability(audio)[0]
+        except Exception as e:
+            logging.error(f"Error extracting danceability for {audio_file}: {e}\n{traceback.format_exc()}")
+            features['danceability'] = None
+
+        try:
+            features['dynamic_complexity'] = dynamic_complexity(audio)[0]
+        except Exception as e:
+            logging.error(f"Error extracting dynamic complexity for {audio_file}: {e}\n{traceback.format_exc()}")
+            features['dynamic_complexity'] = None
+
         features['last_modified'] = os.path.getmtime(audio_file)
         features['duration'] = min(len(audio) / sample_rate, 30)
 
